@@ -178,6 +178,10 @@ async def delete_plan(plan_id: int, connection: Connection) -> int:
 
 
 async def create_transaction(tx: Transaction, connection: Connection) -> int:
+    await connection.execute(
+        "UPDATE transactions SET status = 'cancelled' WHERE tg_id = ? AND status = 'pending'",
+        (tx.tg_id,),
+    )
     cursor = await connection.execute(
         "INSERT INTO transactions (id, tg_id, plan_id, amount, status) VALUES (?, ?, ?, ?, ?)",
         (tx.id, tx.tg_id, tx.plan_id, tx.amount, tx.status),
