@@ -79,7 +79,7 @@ async def cb_my_keys(call: CallbackQuery, connection: Connection) -> None:
 
     for host in hosts:
         try:
-            client = await xui.get_client(host, f"tg{user_id}@{host.host_name}")
+            client = await xui.get_client(host, f"{user_id}@{host.host_name}")
             if client.enable and client.expiry_ms > now_ms:
                 keys.append((host.host_name, client.expiry_ms))
         except Exception:
@@ -107,7 +107,7 @@ async def cb_key_detail(call: CallbackQuery, connection: Connection) -> None:
         await call.answer("Сервер не найден", show_alert=True)
         return
 
-    email = f"tg{call.from_user.id}@{host_name}"
+    email = f"{call.from_user.id}@{host_name}"
     try:
         client = await xui.get_client(host, email)
     except Exception:
