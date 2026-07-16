@@ -47,6 +47,7 @@ async def provision_key(
                     * 1000
                 )
             sub_id = existing.get("subId") or _gen_sub_id()
+            existing["id"] = str(existing["id"])
             existing["expiryTime"] = expiry_ms
             existing["enable"] = True
             existing["subId"] = sub_id

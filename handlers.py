@@ -115,10 +115,11 @@ async def cb_key_detail(call: CallbackQuery, connection: Connection) -> None:
         return
 
     expiry = datetime.fromtimestamp(client.expiry_ms / 1000).strftime("%d.%m.%Y %H:%M")
+    connection_string = f"{host.public_url.rstrip('/')}/{client.sub_id}" if host.public_url else client.sub_id
     await call.message.edit_text(
         f"🔑 <b>Ключ — {host_name}</b>\n\n"
         f"⏳ Действует до: {expiry}\n\n"
-        f"<code>{client.sub_id}</code>",
+        f"<code>{connection_string}</code>",
         reply_markup=key_detail_menu(host_name),
         parse_mode="HTML",
     )
