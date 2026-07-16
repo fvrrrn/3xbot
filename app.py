@@ -5,6 +5,7 @@ from typing import Any
 
 import aiohttp
 from aiogram import BaseMiddleware, Bot, Dispatcher
+from aiogram.types import BotCommand, CallbackQuery
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -52,6 +53,10 @@ def build_app() -> web.Application:
         session = aiohttp.ClientSession()
         dispatcher.update.middleware(ConnectionMiddleware(connection))
         await bot.set_webhook(f"{settings.webhook_url}{settings.telegram_webhook_path}")
+        await bot.set_my_commands([
+            BotCommand(command="start", description="Главное меню"),
+            BotCommand(command="support", description="Написать в поддержку"),
+        ])
         app["connection"] = connection
         app["session"] = session
         app["bot"] = bot
