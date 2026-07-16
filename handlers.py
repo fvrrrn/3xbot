@@ -80,8 +80,8 @@ async def cb_my_keys(call: CallbackQuery, connection: Connection) -> None:
     for host in hosts:
         try:
             client = await xui.get_client(host, f"tg{user_id}@{host.host_name}")
-            if client.enable and client.expiry_time > now_ms:
-                keys.append((host.host_name, client.expiry_time))
+            if client.enable and client.expiry_ms > now_ms:
+                keys.append((host.host_name, client.expiry_ms))
         except Exception:
             continue
 
@@ -114,9 +114,7 @@ async def cb_key_detail(call: CallbackQuery, connection: Connection) -> None:
         await call.answer("Ключ не найден", show_alert=True)
         return
 
-    expiry = datetime.fromtimestamp(client.expiry_time / 1000).strftime(
-        "%d.%m.%Y %H:%M"
-    )
+    expiry = datetime.fromtimestamp(client.expiry_ms / 1000).strftime("%d.%m.%Y %H:%M")
     await call.message.edit_text(
         f"🔑 <b>Ключ — {host_name}</b>\n\n"
         f"⏳ Действует до: {expiry}\n\n"
@@ -124,7 +122,6 @@ async def cb_key_detail(call: CallbackQuery, connection: Connection) -> None:
         reply_markup=key_detail_menu(host_name),
         parse_mode="HTML",
     )
-
 
 
 # ── buy flow ──────────────────────────────────────────────────────────────────

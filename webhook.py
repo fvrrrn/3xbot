@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import logging
+from collections.abc import Mapping
 from datetime import datetime
 from urllib.parse import quote
 
@@ -15,12 +16,14 @@ from models import ProvisionResult, YooMoneyRequest
 logger = logging.getLogger(__name__)
 
 
-def _is_signature_verified(form_data: dict[str, str], secret: str) -> bool:
+def _is_signature_verified(form_data: Mapping[str, str], secret: str) -> bool:
     params = {k: v for k, v in form_data.items() if k != "sign"}
     sorted_str = "&".join(
         f"{k}={quote(str(v), safe='')}" for k, v in sorted(params.items())
     )
-    expected = hmac.new(secret.encode(), sorted_str.encode(), hashlib.sha256).hexdigest()
+    expected = hmac.new(
+        secret.encode(), sorted_str.encode(), hashlib.sha256
+    ).hexdigest()
     return hmac.compare_digest(expected, form_data.get("sign", ""))
 
 
@@ -48,12 +51,14 @@ async def handle_youmoney_callback(request: web.Request) -> web.Response:
     bot: Bot = request.app["bot"]
     secret: str = request.app["yoomoney_secret"]
 
-    if not _is_signature_verified(dict(form_data), secret):
+    if not _is_signature_verified(form_data, secret):
         logger.warning("webhook sig failed for user=%d", tg_id)
         return web.Response(status=403)
 
     try:
-        tx = await db.find_pending_transaction(tg_id, yoo_money_request.paid_amount, connection)
+        tx = await db.find_pending_transaction(
+            tg_id, yoo_money_request.paid_amount, connection
+        )
     except Exception as e:
         logger.warning("no pending transaction for user=%d: %s", tg_id, e)
         return web.Response(status=402)
@@ -84,7 +89,9 @@ async def handle_youmoney_callback(request: web.Request) -> web.Response:
         return web.Response(status=500)
 
     try:
-        await bot.send_message(tg_id, _key_text(result, plan.plan_name), parse_mode="HTML")
+        await bot.send_message(
+            tg_id, _key_text(result, plan.plan_name), parse_mode="HTML"
+        )
     except Exception as e:
         logger.error("notify failed for user=%d: %s", tg_id, e)
 

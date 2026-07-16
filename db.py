@@ -257,11 +257,11 @@ async def get_stats(connection: Connection) -> dict:
     cursor = await connection.execute(
         "SELECT COUNT(*) as c FROM transactions WHERE status = 'completed'"
     )
-    # TODO: Object of type "None" is not subscriptable [reportOptionalSubscript]
-    transactions = (await cursor.fetchone())["c"]
+    row = await cursor.fetchone()
+    transactions = row["c"] if row else 0
     cursor = await connection.execute(
         "SELECT COALESCE(SUM(amount), 0) as s FROM transactions WHERE status = 'completed'"
     )
-    # TODO: Object of type "None" is not subscriptable [reportOptionalSubscript]
-    revenue = (await cursor.fetchone())["s"]
+    row = await cursor.fetchone()
+    revenue = row["s"] if row else 0.0
     return {"transactions": transactions, "revenue": revenue}

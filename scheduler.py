@@ -20,7 +20,7 @@ async def _check_expiry(bot: Bot, connection: Connection) -> None:
         return
 
     now_ms = int(datetime.now().timestamp() * 1000)
-    threshold_ms = settings.expiry_notify_hours * 3600 * 1000
+    threshold_ms = settings.expiry_notify_h * 3600 * 1000
 
     for host in hosts:
         try:
@@ -31,12 +31,14 @@ async def _check_expiry(bot: Bot, connection: Connection) -> None:
         for client in clients:
             if client.tg_id == 0:
                 continue
-            if client.expiry_time == 0 or client.expiry_time <= now_ms:
+            if client.expiry_ms == 0 or client.expiry_ms <= now_ms:
                 continue
-            if client.expiry_time - now_ms > threshold_ms:
+            if client.expiry_ms - now_ms > threshold_ms:
                 continue
 
-            expiry = datetime.fromtimestamp(client.expiry_time / 1000).strftime("%d.%m.%Y %H:%M")
+            expiry = datetime.fromtimestamp(client.expiry_ms / 1000).strftime(
+                "%d.%m.%Y %H:%M"
+            )
             try:
                 await bot.send_message(
                     client.tg_id,

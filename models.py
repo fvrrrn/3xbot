@@ -84,6 +84,6 @@ class Client(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     email: str = ""
     tg_id: int = Field(alias="tgId", default=0)
-    expiry_time: int = Field(alias="expiryTime", default=0)
+    expiry_ms: int = Field(alias="expiryTime", default=0)
     sub_id: str = Field(alias="subId", default="")
     enable: bool = False

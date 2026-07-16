@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     yoomoney_secret: str
     yoomoney_receiver: str
     db_path: str = "db.sqlite3"
-    expiry_notify_hours: int = 24
+    expiry_notify_h: int = 24
     scheduler_time_h: int = 24
     webhook_url: str
     webhook_port: int
