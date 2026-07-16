@@ -32,7 +32,8 @@ async def provision_key(
         ) as resp:
             data = await resp.json()
 
-        existing = data.get("obj") if data.get("success") else None
+        obj = data.get("obj") if data.get("success") else None
+        existing = obj.get("client") if obj else None
         now_ms = int(datetime.now().timestamp() * 1000)
         expiry_ms = int((datetime.now() + timedelta(days=days)).timestamp() * 1000)
 
@@ -113,9 +114,10 @@ async def get_client(host: Host, email: str) -> Client:
         ) as resp:
             data = await resp.json()
     obj = data.get("obj") if data.get("success") else None
-    if not obj:
+    client = obj.get("client") if obj else None
+    if not client:
         raise ValueError(f"Client {email!r} not found on {host.host_name!r}")
-    return Client.model_validate(obj)
+    return Client.model_validate(client)
 
 
 async def get_all_clients(host: Host) -> list[Client]:
