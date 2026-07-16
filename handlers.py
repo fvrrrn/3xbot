@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 
 from aiogram import Bot, F, Router
-from aiogram.filters import BaseFilter, Command
+from aiogram.filters import BaseFilter, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiosqlite import Connection
@@ -296,7 +296,7 @@ async def cmd_support(message: Message, bot: Bot, connection: Connection) -> Non
         logger.error("forward to support failed: %s", e)
 
 
-@router.message(F.chat.type == "private", ~F.text.startswith("/"))
+@router.message(F.chat.type == "private", ~F.text.startswith("/"), StateFilter(None))
 async def forward_to_support(
     message: Message, bot: Bot, connection: Connection
 ) -> None:
@@ -637,8 +637,8 @@ async def fsm_broadcast(
         try:
             clients = await xui.get_all_clients(host)
             for c in clients:
-                tg_id = c.get("tgId") or 0
-                if tg_id:
+                if c.tg_id:
+                    tg_ids.add(c.tg_id)
                     tg_ids.add(tg_id)
         except Exception:
             continue
