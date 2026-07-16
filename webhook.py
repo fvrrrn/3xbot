@@ -39,6 +39,7 @@ def _key_text(result: ProvisionResult, plan_name: str) -> str:
 
 async def handle_youmoney_callback(request: web.Request) -> web.Response:
     form_data = await request.post()
+    logger.info("yoomoney incoming: %s", dict(form_data))
 
     try:
         yoo_money_request = YooMoneyRequest.model_validate(form_data)
