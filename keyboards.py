@@ -31,9 +31,9 @@ def plans_menu(plans: list[Plan]) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def payment_menu(user_id: int, amount: float, receiver: str) -> InlineKeyboardMarkup:
+def payment_menu(tg_id: int, amount: float, receiver: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    link = f"https://yoomoney.ru/transfer/quickpay?receiver={receiver}&sum={amount:.2f}&label={user_id}&comment=vpn"
+    link = f"https://yoomoney.ru/quickpay/confirm?receiver={receiver}&quickpay-form=button&paymentType=AC&sum={amount:.2f}&label={tg_id}"
     kb.button(text="💳 Оплатить", url=link)
     kb.button(text="◀️ Назад", callback_data="buy")
     kb.adjust(1)
