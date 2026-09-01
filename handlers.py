@@ -182,6 +182,7 @@ async def cb_buy_plan(
     try:
         await db.create_transaction(tx, connection)
     except Exception:
+        logger.exception("create_transaction failed for user=%d", call.from_user.id)
         await call.answer("Ошибка создания платежа", show_alert=True)
         return
 
@@ -240,6 +241,7 @@ async def cb_extend_plan(
     try:
         await db.create_transaction(tx, connection)
     except Exception:
+        logger.exception("create_transaction failed for user=%d", call.from_user.id)
         await call.answer("Ошибка создания платежа", show_alert=True)
         return
 

@@ -38,6 +38,14 @@ def _key_text(result: ProvisionResult, plan_name: str) -> str:
 
 
 async def handle_youmoney_callback(request: web.Request) -> web.Response:
+    """Provision a key for a completed YooMoney payment.
+
+    YooMoney treats only HTTP 200 as delivered and redelivers anything else
+    for roughly a day. So the status code answers one question — is a retry
+    worth attempting? Permanent outcomes (done, junk, unknown payment) return
+    200; transient ones (panel or database unreachable) return non-200 so the
+    payment is redelivered and the user gets their key without support.
+    """
     form_data = await request.post()
     logger.info("yoomoney incoming: %s", dict(form_data))
 
@@ -45,7 +53,7 @@ async def handle_youmoney_callback(request: web.Request) -> web.Response:
         yoo_money_request = YooMoneyRequest.model_validate(form_data)
     except Exception as e:
         logger.warning("webhook parse failed: %s", e)
-        return web.Response(status=422)
+        return web.Response()
 
     tg_id = yoo_money_request.tg_id
     connection: Connection = request.app["connection"]
@@ -62,32 +70,37 @@ async def handle_youmoney_callback(request: web.Request) -> web.Response:
         )
     except Exception as e:
         logger.warning("no pending transaction for user=%d: %s", tg_id, e)
-        return web.Response(status=402)
+        return web.Response()
 
     try:
         plan = await db.get_plan(tx.plan_id, connection)
     except Exception as e:
         logger.warning("plan %d not found: %s", tx.plan_id, e)
-        return web.Response(status=422)
+        return web.Response(status=500)
 
     try:
         host = await db.get_host(plan.host_name, connection)
     except Exception as e:
         logger.warning("host %s not found: %s", plan.host_name, e)
-        return web.Response(status=422)
+        return web.Response(status=500)
 
     email = f"{tg_id}@{host.host_name}"
     try:
         result = await xui.provision_key(host, email, plan.months * 30, tg_id)
     except Exception as e:
         logger.error("provision failed for user=%d: %s", tg_id, e)
-        return web.Response()
+        return web.Response(status=502)
 
     try:
         await db.complete_transaction(tx.id, connection)
     except Exception as e:
-        logger.error("complete_transaction failed for user=%d: %s", tg_id, e)
-        return web.Response(status=500)
+        logger.error(
+            "complete_transaction failed for user=%d, tx=%s: key was provisioned, "
+            "reconcile manually",
+            tg_id,
+            tx.id,
+        )
+        return web.Response()
 
     try:
         await bot.send_message(
@@ -96,4 +109,4 @@ async def handle_youmoney_callback(request: web.Request) -> web.Response:
     except Exception as e:
         logger.error("notify failed for user=%d: %s", tg_id, e)
 
-    return web.Response(status=202)
+    return web.Response()

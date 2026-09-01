@@ -44,7 +44,9 @@ SQLite stores only hosts, plans, transactions, and support threads. **It does no
 1. `cb_buy_plan` / `cb_extend_plan` insert a `pending` transaction (uuid id) and show a YooMoney quickpay button built in `keyboards.payment_menu`. `create_transaction` cancels the user's other pending rows first, so at most one is open.
 2. The quickpay link carries `label=<tg_id>` — that label is the only identifier YooMoney returns, so the callback matches on tg_id + amount.
 3. `handle_youmoney_callback` validates the form with `YooMoneyRequest`, verifies the HMAC-SHA256 `sign` over the URL-encoded sorted params, then `find_pending_transaction` (amount must be within 10%), provisions, and marks the transaction completed.
-4. Status codes are deliberate and used as debugging signal: 422 parse/lookup failure, 403 bad signature, 402 no pending transaction, 500 bookkeeping failure, 202 success. A provisioning failure returns 200 so YooMoney does not retry.
+4. Status codes encode a retry decision, not a diagnosis — YooMoney accepts only 200 as delivered and redelivers anything else for ~24h. Permanent outcomes return 200 (success, unparseable form, unknown/already-completed payment); transient ones return non-200 so the payment is redelivered (500 plan/host lookup, 502 panel unreachable, 403 bad signature — a wrong `YOOMONEY_SECRET` is fixable, and retries then land). Diagnosis belongs in the logs.
+
+   The one deliberate exception: if `complete_transaction` fails *after* provisioning, it returns 200 and logs an error for manual reconciliation. Retrying there would re-run `provision_key` against a still-`pending` row and credit the user a second block of days.
 
 Buying and extending are the same code path — `xui.provision_key` adds the client if absent, and if a client exists with a future expiry it *extends from the existing expiry* rather than from now.
 
