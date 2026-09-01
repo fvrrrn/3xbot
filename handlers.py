@@ -623,7 +623,10 @@ async def fsm_plan_price(
 @router.callback_query(F.data == "admin:broadcast", IsAdmin())
 async def cb_admin_broadcast(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminBroadcast.message)
-    await call.message.edit_text("Введите текст для рассылки (HTML):")
+    await call.message.edit_text(
+        "Отправьте сообщение для рассылки.\n"
+        "Можно текст (HTML), фото, видео или документ с подписью."
+    )
 
 
 @router.message(AdminBroadcast.message, IsAdmin())
@@ -650,9 +653,10 @@ async def fsm_broadcast(
     sent, failed = 0, 0
     for tg_id in tg_ids:
         try:
-            await bot.send_message(tg_id, message.text, parse_mode="HTML")
+            await bot.copy_message(tg_id, message.chat.id, message.message_id)
             sent += 1
-        except Exception:
+        except Exception as e:
+            logger.warning("broadcast to %d failed: %s", tg_id, e)
             failed += 1
     await message.answer(
         f"📢 Рассылка завершена\n✅ Отправлено: {sent}\n❌ Ошибок: {failed}",
