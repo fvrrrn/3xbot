@@ -205,7 +205,7 @@ async def find_pending_transaction(
     if row is None:
         raise ValueError(f"No pending transaction for user {tg_id}")
     if abs(row["amount"] - amount) > row["amount"] * 0.10:
-        raise ValueError(f"Amount mismatch: expected ~{amount}, got {row['amount']}")
+        raise ValueError(f"Amount mismatch: expected ~{row['amount']}, got {amount}")
     return Transaction(
         id=row["id"],
         tg_id=row["tg_id"],
