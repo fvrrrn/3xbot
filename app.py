@@ -3,19 +3,17 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import aiohttp
 from aiogram import BaseMiddleware, Bot, Dispatcher
-from aiogram.types import BotCommand, CallbackQuery
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import TelegramObject
+from aiogram.types import BotCommand, TelegramObject
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from aiosqlite import Connection
 
 import db
-import webhook
+import xui
 from config import settings
 from handlers import router
 from scheduler import run_scheduler
@@ -50,37 +48,35 @@ def build_app() -> web.Application:
 
     async def on_startup(app: web.Application) -> None:
         connection = await db.get_connection(settings.db_path)
-        session = aiohttp.ClientSession()
         dispatcher.update.middleware(ConnectionMiddleware(connection))
-        await bot.set_webhook(f"{settings.webhook_url}{settings.telegram_webhook_path}")
-        await bot.set_my_commands([
-            BotCommand(command="start", description="Главное меню"),
-            BotCommand(command="support", description="Написать в поддержку"),
-        ])
+        await bot.set_webhook(settings.telegram_webhook_url.encoded_string())
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="Главное меню"),
+                BotCommand(command="support", description="Написать в поддержку"),
+            ]
+        )
+        await bot.set_my_description("Description")
+        await bot.set_my_short_description("Short description")
         app["connection"] = connection
-        app["session"] = session
         app["bot"] = bot
-        app["yoomoney_secret"] = settings.yoomoney_secret
-        asyncio.create_task(run_scheduler(bot, connection))
+        asyncio.create_task(run_scheduler(bot))
         logger.info("started")
 
     async def on_cleanup(app: web.Application) -> None:
         await bot.delete_webhook()
-        await app["session"].close()
+        await xui.close()
         await app["connection"].close()
 
     app = web.Application()
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     SimpleRequestHandler(dispatcher=dispatcher, bot=bot).register(
-        app, path=settings.telegram_webhook_path
-    )
-    app.router.add_post(
-        settings.yoomoney_webhook_path, webhook.handle_youmoney_callback
+        app, path=settings.telegram_webhook_url.path
     )
     setup_application(app, dispatcher, bot=bot)
     return app
 
 
 if __name__ == "__main__":
-    web.run_app(build_app(), host="0.0.0.0", port=settings.webhook_port)
+    web.run_app(build_app(), host="0.0.0.0", port=settings.telegram_webhook_url.port)
