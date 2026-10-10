@@ -121,9 +121,11 @@ there is no raw-link fallback.
 client only. It never creates a client or changes its subscription ID. Expiry is
 `max(client.expiry_ms, now_ms) + days * 86400 * 1000`; the client is enabled.
 `Client` allows extra fields so credentials, flow, quotas, and other panel fields
-survive a model round trip. Serialize with aliases and cast `id` to string for
-POST `/panel/api/clients/update/{email}`. Return the copied, extended client only
-after the panel reports success; leave the input model unchanged.
+survive a model round trip. Serialize with aliases and set the update payload's
+`id` to the credential `uuid` when present, otherwise the client's `id`, cast to
+string. Unified panel records use a numeric database ID distinct from the UUID
+expected by POST `/panel/api/clients/update/{email}`. Return the copied, extended
+client only after the panel reports success; leave the input model unchanged.
 
 ## Payment flow
 

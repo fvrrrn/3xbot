@@ -327,7 +327,9 @@ async def extend_subscription(
     expiry_ms = max(client.expiry_ms, now_ms) + days * 86400 * 1000
     extended = client.model_copy(update={"expiry_ms": expiry_ms, "enable": True})
     payload = extended.model_dump(mode="json", by_alias=True)
-    payload["id"] = str(client.id)
+    # Unified client records have a numeric id and a separate credential uuid;
+    # the update endpoint expects that credential in its legacy id field.
+    payload["id"] = str(payload.get("uuid") or client.id)
     maybe_response = await either_from_awaitable(
         session.request(
             method="POST",
