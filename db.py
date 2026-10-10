@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
@@ -8,6 +8,14 @@ from aiosqlite import Connection
 from models import Transaction
 
 logger = logging.getLogger(__name__)
+
+
+class PendingTransactionNotFound(ValueError):
+    """No pending transaction with this ID exists."""
+
+
+class SupportThreadNotFound(ValueError):
+    """No support mapping exists for this user or topic."""
 
 
 async def get_connection(path: str) -> Connection:
@@ -21,9 +29,8 @@ async def get_connection(path: str) -> Connection:
             tg_id INTEGER NOT NULL,
             months INTEGER NOT NULL,
             amount REAL NOT NULL,
-            message_id INTEGER,
             status TEXT NOT NULL DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
         )
     """)
     await connection.execute("""
@@ -31,6 +38,12 @@ async def get_connection(path: str) -> Connection:
             id INTEGER PRIMARY KEY,
             topic_id INTEGER NOT NULL
         )
+    """)
+    # Legacy CURRENT_TIMESTAMP values were UTC without an explicit offset.
+    await connection.execute("""
+        UPDATE transactions
+        SET created_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', created_at)
+        WHERE created_at NOT LIKE '%+00:00'
     """)
     await connection.commit()
     return connection
@@ -42,9 +55,16 @@ async def create_transaction(tx: Transaction, connection: Connection) -> int:
         (tx.tg_id,),
     )
     cursor = await connection.execute(
-        """INSERT INTO transactions (id, tg_id, months, amount, message_id, status)
+        """INSERT INTO transactions (id, tg_id, months, amount, status, created_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        (tx.id, tx.tg_id, tx.months, tx.amount, tx.message_id, tx.status),
+        (
+            tx.id,
+            tx.tg_id,
+            tx.months,
+            tx.amount,
+            tx.status,
+            tx.created_at.astimezone(UTC).isoformat(),
+        ),
     )
     await connection.commit()
     if cursor.lastrowid is None:
@@ -61,13 +81,12 @@ async def get_pending_transaction(
     )
     row = await cursor.fetchone()
     if row is None:
-        raise ValueError(f"No pending transaction {transaction_id!r}")
+        raise PendingTransactionNotFound(f"No pending transaction {transaction_id!r}")
     return Transaction(
         id=row["id"],
         tg_id=row["tg_id"],
         months=row["months"],
         amount=row["amount"],
-        message_id=row["message_id"],
         status=row["status"],
         created_at=datetime.fromisoformat(row["created_at"]),
     )
@@ -89,7 +108,7 @@ async def get_support_thread(tg_id: int, connection: Connection) -> int:
     )
     row = await cursor.fetchone()
     if row is None:
-        raise ValueError(f"No support thread for user {tg_id}")
+        raise SupportThreadNotFound(f"No support thread for user {tg_id}")
     return row["topic_id"]
 
 
@@ -110,7 +129,7 @@ async def get_user_by_thread(topic_id: int, connection: Connection) -> int:
     )
     row = await cursor.fetchone()
     if row is None:
-        raise ValueError(f"No user for thread {topic_id}")
+        raise SupportThreadNotFound(f"No user for thread {topic_id}")
     return row["id"]
 
 

@@ -1,13 +1,9 @@
 from datetime import datetime
+from typing import Literal
+from uuid import UUID
 
+from aiogram.filters.callback_data import CallbackData
 from pydantic import BaseModel, ConfigDict, Field
-
-
-class ProvisionResult(BaseModel):
-    email: str
-    expiry_ms: int
-    connection_string: str
-    sub_id: str
 
 
 class Transaction(BaseModel):
@@ -15,13 +11,19 @@ class Transaction(BaseModel):
     tg_id: int
     months: int
     amount: float
-    message_id: int | None = None
     status: str
     created_at: datetime
 
 
+class TransactionCallback(CallbackData, prefix="tx"):
+    action: Literal["paid", "confirm"]
+    transaction_id: UUID
+
+
 class Client(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    # Preserve panel fields such as flow, quotas and credentials when updating.
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    id: int | str = ""
     email: str = ""
     tg_id: int = Field(alias="tgId", default=0)
     expiry_ms: int = Field(alias="expiryTime", default=0)

@@ -1,295 +1,294 @@
+import asyncio
+import html
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import BaseFilter, Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, Message, User
+from aiohttp import ClientSession
 from aiosqlite import Connection
+from expression import Result
 
 import db
 import xui
-from config import settings
+from config import Settings
 from keyboards import (
-    admin_hosts_menu,
-    admin_menu,
-    admin_plans_menu,
-    back_to_menu,
-    hosts_menu,
-    key_detail_menu,
-    main_menu,
-    my_keys_menu,
-    payment_menu,
-    plans_menu,
+    confirm_button,
+    paid_button,
 )
-from models import Host, Plan, Transaction
-from states import AdminAddHost, AdminAddPlan, AdminBroadcast, Buy, Extend
+from models import Transaction, TransactionCallback
+from states import AdminBroadcast
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 
 class IsAdmin(BaseFilter):
-    async def __call__(self, message: Message) -> bool:
+    async def __call__(
+        self, message: Message | CallbackQuery, settings: Settings
+    ) -> bool:
         return (
             message.from_user is not None
-            and message.from_user.id in settings.telegram_admin_ids
+            and message.from_user.id == settings.telegram_admin_id
         )
 
 
-# ── /start ────────────────────────────────────────────────────────────────────
+class IsSupportGroup(BaseFilter):
+    async def __call__(self, message: Message, settings: Settings) -> bool:
+        return message.chat.id == settings.support_group_id
 
 
 @router.message(Command("start"))
-async def cmd_start(message: Message) -> None:
-    await message.answer(
-        "👋 Добро пожаловать!\n\nВыберите действие:", reply_markup=main_menu()
-    )
-
-
-@router.callback_query(F.data == "menu")
-async def cb_menu(call: CallbackQuery) -> None:
-
-    # TODO:
-    # Diagnostics:
-    # 1. Cannot access attribute "edit_text" for class "InaccessibleMessage"
-    #      Attribute "edit_text" is unknown [reportAttributeAccessIssue]
-    # 2. "edit_text" is not a known attribute of "None" [reportOptionalMemberAccess]
-    await call.message.edit_text("Выберите действие:", reply_markup=main_menu())
-
-
-# ── my keys ───────────────────────────────────────────────────────────────────
-
-
-@router.callback_query(F.data == "my_keys")
-async def cb_my_keys(call: CallbackQuery, connection: Connection) -> None:
-    try:
-        hosts = await db.get_hosts(connection)
-    except Exception:
-        await call.message.edit_text(
-            "У вас нет активных ключей.\n\nКупите подписку в разделе 🛒 Купить.",
-            reply_markup=back_to_menu(),
-        )
-        return
-
-    user_id = call.from_user.id
-    now_ms = int(datetime.now().timestamp() * 1000)
-    keys: list[tuple[str, int]] = []
-
-    for host in hosts:
-        try:
-            client = await xui.get_client(host, f"{user_id}@{host.host_name}")
-            if client.enable and client.expiry_ms > now_ms:
-                keys.append((host.host_name, client.expiry_ms))
-        except Exception:
-            continue
-
-    if not keys:
-        await call.message.edit_text(
-            "У вас нет активных ключей.\n\nКупите подписку в разделе 🛒 Купить.",
-            reply_markup=back_to_menu(),
-        )
-        return
-
-    await call.message.edit_text(
-        "🔑 <b>Ваши ключи:</b>", reply_markup=my_keys_menu(keys), parse_mode="HTML"
-    )
-
-
-@router.callback_query(F.data.startswith("key:"))
-async def cb_key_detail(call: CallbackQuery, connection: Connection) -> None:
-    # TODO: "split" is not a known attribute of "None" [reportOptionalMemberAccess]
-    host_name = call.data.split(":", 1)[1]
-    try:
-        host = await db.get_host(host_name, connection)
-    except Exception:
-        await call.answer("Сервер не найден", show_alert=True)
-        return
-
-    email = f"{call.from_user.id}@{host_name}"
-    try:
-        client = await xui.get_client(host, email)
-    except Exception:
-        await call.answer("Ключ не найден", show_alert=True)
-        return
-
-    expiry = datetime.fromtimestamp(client.expiry_ms / 1000).strftime("%d.%m.%Y %H:%M")
-    connection_string = (
-        f"{host.public_url.rstrip('/')}/{client.sub_id}"
-        if host.public_url
-        else client.sub_id
-    )
-    await call.message.edit_text(
-        f"🔑 <b>Ключ — {host_name}</b>\n\n"
-        f"⏳ Действует до: {expiry}\n\n"
-        f"<code>{connection_string}</code>",
-        reply_markup=key_detail_menu(host_name),
-        parse_mode="HTML",
-    )
-
-
-# ── buy flow ──────────────────────────────────────────────────────────────────
-
-
-@router.callback_query(F.data == "buy")
-async def cb_buy(
-    call: CallbackQuery, state: FSMContext, connection: Connection
+async def cmd_start(
+    message: Message, session: ClientSession, settings: Settings
 ) -> None:
-    try:
-        hosts = await db.get_hosts(connection)
-    except Exception:
-        await call.answer("Нет доступных серверов", show_alert=True)
+    if message.from_user is None:
+        logger.warning("start without sender in chat=%d", message.chat.id)
+        await message.answer("Не удалось определить пользователя.")
         return
-    await state.set_state(Buy.host)
-    await call.message.edit_text("🖥 Выберите сервер:", reply_markup=hosts_menu(hosts))
+    tg_id = message.from_user.id
+    email = str(tg_id)
+
+    match await xui.get_or_create_subscription(
+        email=email,
+        days=settings.trial_days,
+        tg_id=tg_id,
+        session=session,
+        panel_url=settings.xui_url,
+    ):
+        case Result(tag="ok", ok=subscription_url):
+            maybe_sent_message = await xui.either_from_awaitable(
+                message.answer(
+                    str(subscription_url),
+                    parse_mode="HTML",
+                ),
+                exception_class=Exception,
+            )
+            if maybe_sent_message.is_error():
+                logger.error(
+                    "Could not send key for user=%d: %s",
+                    tg_id,
+                    maybe_sent_message.error,
+                )
+                return
+
+        case Result(tag="error", error=error):
+            logger.error("Could not get client for user=%d: %s", tg_id, error)
+            await message.answer("Не удалось получить ключ. Попробуйте позже.")
 
 
-@router.callback_query(Buy.host, F.data.startswith("host:"))
-async def cb_buy_host(
-    call: CallbackQuery, state: FSMContext, connection: Connection
-) -> None:
-    host_name = call.data.split(":")[1]
-    try:
-        plans = await db.get_plans(connection, host_name)
-    except Exception:
-        await call.answer("Нет тарифов для этого сервера", show_alert=True)
-        return
-    await state.update_data(host_name=host_name)
-    await state.set_state(Buy.plan)
-    await call.message.edit_text("📦 Выберите тариф:", reply_markup=plans_menu(plans))
-
-
-@router.callback_query(Buy.plan, F.data.startswith("plan:"))
-async def cb_buy_plan(
-    call: CallbackQuery, state: FSMContext, connection: Connection
-) -> None:
-    plan_id = int(call.data.split(":")[1])
-    try:
-        plan = await db.get_plan(plan_id, connection)
-    except Exception:
-        await call.answer("Тариф не найден", show_alert=True)
-        return
-
-    tx = Transaction(
-        id=str(uuid.uuid4()),
-        tg_id=call.from_user.id,
-        plan_id=plan_id,
-        amount=plan.price,
-        status="pending",
-        created_at=datetime.now(),
-    )
-    try:
-        await db.create_transaction(tx, connection)
-    except Exception:
-        logger.exception("create_transaction failed for user=%d", call.from_user.id)
-        await call.answer("Ошибка создания платежа", show_alert=True)
-        return
-
-    await state.clear()
-    await call.message.edit_text(
-        f"💳 <b>Оплата</b>\n\n"
-        f"Тариф: {plan.plan_name}\n"
-        f"Сумма: <b>{plan.price:.0f}₽</b>\n\n"
-        f"Нажмите кнопку ниже для оплаты. После успешной оплаты ключ придёт автоматически.",
-        reply_markup=payment_menu(
-            call.from_user.id, plan.price, settings.yoomoney_receiver
-        ),
-        parse_mode="HTML",
-    )
-
-
-# ── extend flow ───────────────────────────────────────────────────────────────
-
-
-@router.callback_query(F.data.startswith("extend:"))
+@router.callback_query(F.data.startswith("extend"))
 async def cb_extend(
-    call: CallbackQuery, state: FSMContext, connection: Connection
+    call: CallbackQuery, connection: Connection, settings: Settings
 ) -> None:
-    host_name = call.data.split(":", 1)[1]
-    try:
-        plans = await db.get_plans(connection, host_name)
-    except Exception:
-        await call.answer("Нет тарифов для продления", show_alert=True)
+    if call.message is None or isinstance(call.message, InaccessibleMessage):
+        await call.answer("Сообщение недоступно. Откройте /start", show_alert=True)
         return
-    await state.update_data(host_name=host_name)
-    await state.set_state(Extend.confirm)
-    await call.message.edit_text(
-        "📦 Выберите тариф для продления:", reply_markup=plans_menu(plans)
-    )
-
-
-@router.callback_query(Extend.confirm, F.data.startswith("plan:"))
-async def cb_extend_plan(
-    call: CallbackQuery, state: FSMContext, connection: Connection
-) -> None:
-    plan_id = int(call.data.split(":")[1])
-    try:
-        plan = await db.get_plan(plan_id, connection)
-    except Exception:
-        await call.answer("Тариф не найден", show_alert=True)
-        return
-
+    tg_id = call.from_user.id
     tx = Transaction(
         id=str(uuid.uuid4()),
-        tg_id=call.from_user.id,
-        plan_id=plan_id,
-        amount=plan.price,
+        tg_id=tg_id,
+        months=settings.plan_months,
+        amount=settings.plan_price_rub,
         status="pending",
-        created_at=datetime.now(),
+        created_at=datetime.now(UTC),
     )
     try:
         await db.create_transaction(tx, connection)
     except Exception:
-        logger.exception("create_transaction failed for user=%d", call.from_user.id)
+        logger.exception("create_transaction failed for user=%d", tg_id)
         await call.answer("Ошибка создания платежа", show_alert=True)
+    else:
+        await call.message.edit_text(
+            f"💳 <b>Продление на {settings.plan_months} мес.</b>\n\n"
+            f"Сумма: <b>{settings.plan_price_rub:.0f}₽</b>\n"
+            f"Перевод: <b>{settings.payment_details}</b>\n\n"
+            f"После перевода нажмите «Я оплатил» — ключ продлится "
+            f"после проверки.",
+            reply_markup=paid_button(tx.id),
+            parse_mode="HTML",
+        )
+        await call.answer()
+
+
+async def _prompt_confirm(
+    bot: Bot, user: User, transaction_id: str, settings: Settings
+) -> None:
+    """Offer the admin a one-tap confirmation of a payment the user claims.
+
+    Raises if no admin could be reached. With no payment provider behind this, an
+    unnoticed claim is a user waiting forever, so the failure has to surface on
+    their screen rather than only in the log.
+    """
+    handle = f"@{user.username}" if user.username else f"id{user.id}"
+    try:
+        await bot.send_message(
+            chat_id=settings.telegram_admin_id,
+            text=f"💰 <b>Ожидает оплаты</b>\n\n"
+            f"{html.escape(user.full_name)} ({html.escape(handle)})\n"
+            f"{settings.plan_price_rub:.0f}₽ за {settings.plan_months} мес.",
+            reply_markup=confirm_button(transaction_id),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"No admin reachable for transaction {transaction_id!r}"
+        ) from e
+
+
+@router.callback_query(TransactionCallback.filter(F.action == "paid"))
+async def cb_paid(
+    call: CallbackQuery,
+    bot: Bot,
+    connection: Connection,
+    callback_data: TransactionCallback,
+    settings: Settings,
+) -> None:
+    if call.message is None or isinstance(call.message, InaccessibleMessage):
+        await call.answer("Сообщение недоступно. Откройте /start", show_alert=True)
+        return
+    transaction_id = str(callback_data.transaction_id)
+    try:
+        tx = await db.get_pending_transaction(transaction_id, connection)
+    except db.PendingTransactionNotFound as e:
+        logger.warning("no pending transaction %s: %s", transaction_id, e)
+        await call.answer("Платёж уже обработан", show_alert=True)
+        return
+    except Exception:
+        logger.exception("could not load transaction %s", transaction_id)
+        await call.answer(
+            "Не удалось проверить платёж. Попробуйте позже.", show_alert=True
+        )
+        return
+    if tx.tg_id != call.from_user.id:
+        await call.answer(
+            "Этот платёж принадлежит другому пользователю", show_alert=True
+        )
         return
 
-    await state.clear()
+    try:
+        await _prompt_confirm(bot, call.from_user, transaction_id, settings)
+    except Exception:
+        logger.exception("could not reach any admin for tx=%s", transaction_id)
+        await call.answer(
+            "Не удалось отправить заявку. Напишите в /support", show_alert=True
+        )
+        return
+
     await call.message.edit_text(
-        f"💳 <b>Продление подписки</b>\n\n"
-        f"Тариф: {plan.plan_name}\n"
-        f"Сумма: <b>{plan.price:.0f}₽</b>\n\n"
-        f"После оплаты подписка будет продлена автоматически.",
-        reply_markup=payment_menu(
-            call.from_user.id, plan.price, settings.yoomoney_receiver
-        ),
+        "⏳ <b>Платёж проверяется</b>\n\n"
+        "Ключ продлится, как только перевод будет подтверждён.",
         parse_mode="HTML",
     )
+    await call.answer()
 
 
-# ── support ───────────────────────────────────────────────────────────────────
+# The only path to a paid extension: an admin who sees the transfer land in their
+# bank app taps this. get_pending_transaction filters on status, so a second tap
+# buys no second block of days.
+@router.callback_query(TransactionCallback.filter(F.action == "confirm"), IsAdmin())
+async def cb_confirm(
+    call: CallbackQuery,
+    connection: Connection,
+    session: ClientSession,
+    callback_data: TransactionCallback,
+    settings: Settings,
+) -> None:
+    if call.message is None or isinstance(call.message, InaccessibleMessage):
+        await call.answer("Сообщение недоступно", show_alert=True)
+        return
+    transaction_id = str(callback_data.transaction_id)
+    try:
+        tx = await db.get_pending_transaction(transaction_id, connection)
+    except db.PendingTransactionNotFound as e:
+        logger.warning("no pending transaction %s: %s", transaction_id, e)
+        await call.answer("Платёж уже подтверждён или отменён", show_alert=True)
+        return
+    except Exception:
+        logger.exception("could not load transaction %s", transaction_id)
+        await call.answer(
+            "Не удалось проверить платёж. Попробуйте позже.", show_alert=True
+        )
+        return
 
+    try:
+        match await xui.get_client(
+            str(tx.tg_id), session=session, panel_url=settings.xui_url
+        ):
+            case Result(tag="ok", ok=client):
+                maybe_result = await xui.extend_subscription(
+                    client, tx.months * 30, session=session, panel_url=settings.xui_url
+                )
+            case Result(tag="error", error=error):
+                logger.error("client lookup failed for user=%d: %s", tx.tg_id, error)
+                await call.answer(
+                    "Не удалось получить клиента. Попробуйте позже.", show_alert=True
+                )
+                return
+    except Exception:
+        logger.exception("extension failed for user=%d", tx.tg_id)
+        await call.answer("Панель недоступна, попробуйте ещё раз", show_alert=True)
+        return
+    match maybe_result:
+        case Result(tag="error", error=error):
+            logger.error("extension failed for user=%d: %s", tx.tg_id, error)
+            await call.answer("Панель недоступна, попробуйте ещё раз", show_alert=True)
+            return
 
-@router.callback_query(F.data == "support_info")
-async def cb_support_info(call: CallbackQuery) -> None:
-    await call.message.edit_text(
-        "💬 <b>Поддержка</b>\n\n"
-        "Напишите /support чтобы открыть тикет. Ваше сообщение будет передано в поддержку.\n"
-        "Обычное время ответа — до 24 часов.",
-        reply_markup=back_to_menu(),
-        parse_mode="HTML",
-    )
+    try:
+        await db.complete_transaction(tx.id, connection)
+    except Exception:
+        # The days are already credited. Dropping the button anyway is the safer
+        # failure: a retry would extend the key a second time.
+        logger.exception(
+            "complete_transaction failed for user=%d, tx=%s: subscription was extended, "
+            "reconcile manually",
+            tx.tg_id,
+            tx.id,
+        )
+    await call.message.edit_reply_markup(reply_markup=None)
+    await call.answer(f"Ключ продлён на {tx.months * 30} дней.")
 
 
 @router.message(Command("support"))
-async def cmd_support(message: Message, bot: Bot, connection: Connection) -> None:
+async def cmd_support(
+    message: Message, bot: Bot, connection: Connection, settings: Settings
+) -> None:
+    if message.from_user is None:
+        logger.warning("support without sender in chat=%d", message.chat.id)
+        await message.answer("Не удалось определить пользователя.")
+        return
     user_id = message.from_user.id
 
     try:
         thread_id = await db.get_support_thread(user_id, connection)
-    except Exception:
+    except db.SupportThreadNotFound:
         try:
             topic = await bot.create_forum_topic(
                 settings.support_group_id,
-                name=f"{message.from_user.full_name} ({user_id})",
+                name=f"{message.from_user.full_name or user_id} ({user_id})"[:128],
             )
             thread_id = topic.message_thread_id
         except Exception as e:
             logger.error("create_forum_topic failed: %s", e)
             await message.answer("Ошибка создания тикета. Попробуйте позже.")
             return
-        await db.save_support_thread(user_id, thread_id, connection)
+        try:
+            await db.save_support_thread(user_id, thread_id, connection)
+        except Exception:
+            logger.exception(
+                "could not save support topic=%d for user=%d", thread_id, user_id
+            )
+            await message.answer("Ошибка сохранения тикета. Попробуйте позже.")
+            return
+    except Exception:
+        logger.exception("could not look up support thread for user=%d", user_id)
+        await message.answer("Поддержка временно недоступна. Попробуйте позже.")
+        return
 
     await message.answer("✅ Тикет открыт. Мы ответим в ближайшее время.")
     try:
@@ -303,13 +302,22 @@ async def cmd_support(message: Message, bot: Bot, connection: Connection) -> Non
         logger.error("forward to support failed: %s", e)
 
 
+# Only forward outside an FSM so support does not consume broadcast input.
 @router.message(F.chat.type == "private", ~F.text.startswith("/"), StateFilter(None))
 async def forward_to_support(
-    message: Message, bot: Bot, connection: Connection
+    message: Message, bot: Bot, connection: Connection, settings: Settings
 ) -> None:
+    if message.from_user is None:
+        logger.warning("support message without sender in chat=%d", message.chat.id)
+        return
     try:
         thread_id = await db.get_support_thread(message.from_user.id, connection)
+    except db.SupportThreadNotFound:
+        await message.answer("Чтобы написать в поддержку, откройте тикет: /support")
+        return
     except Exception:
+        logger.exception("support lookup failed for user=%d", message.from_user.id)
+        await message.answer("Поддержка временно недоступна. Попробуйте позже.")
         return
     try:
         await bot.forward_message(
@@ -320,347 +328,82 @@ async def forward_to_support(
         )
     except Exception as e:
         logger.error("forward to support failed: %s", e)
+        await message.answer(
+            "Не удалось отправить сообщение в поддержку. Попробуйте позже."
+        )
 
 
-@router.message(F.chat.id == settings.support_group_id, F.reply_to_message.is_not(None))
+@router.message(IsSupportGroup(), F.reply_to_message.is_not(None))
 async def support_reply(message: Message, bot: Bot, connection: Connection) -> None:
     if message.message_thread_id is None:
+        logger.debug("ignoring support reply outside a topic")
         return
     try:
         user_id = await db.get_user_by_thread(message.message_thread_id, connection)
+    except db.SupportThreadNotFound:
+        logger.debug("no user mapped to support topic=%d", message.message_thread_id)
+        return
     except Exception:
+        logger.exception(
+            "support user lookup failed for topic=%d", message.message_thread_id
+        )
+        await message.answer("Не удалось найти пользователя. Попробуйте позже.")
         return
     try:
+        # Copy hides the support group's forwarding attribution from the user.
         await bot.copy_message(user_id, message.chat.id, message.message_id)
     except Exception as e:
         logger.error("copy_message to user failed: %s", e)
+        await message.answer("Не удалось доставить ответ пользователю.")
 
 
-# ── admin panel ───────────────────────────────────────────────────────────────
-
-
-@router.message(Command("admin"), IsAdmin())
-async def cmd_admin(message: Message) -> None:
-    await message.answer(
-        "🔧 <b>Панель администратора</b>", reply_markup=admin_menu(), parse_mode="HTML"
-    )
-
-
-@router.callback_query(F.data == "admin:menu", IsAdmin())
-async def cb_admin_menu(call: CallbackQuery) -> None:
-    await call.message.edit_text(
-        "🔧 <b>Панель администратора</b>", reply_markup=admin_menu(), parse_mode="HTML"
-    )
-
-
-@router.callback_query(F.data == "admin:stats", IsAdmin())
-async def cb_admin_stats(call: CallbackQuery, connection: Connection) -> None:
-    try:
-        s = await db.get_stats(connection)
-    except Exception:
-        await call.answer("Ошибка загрузки статистики", show_alert=True)
-        return
-    await call.message.edit_text(
-        f"📊 <b>Статистика</b>\n\n"
-        f"💳 Транзакций: {s['transactions']}\n"
-        f"💰 Выручка: {s['revenue']:.0f}₽",
-        reply_markup=admin_menu(),
-        parse_mode="HTML",
-    )
-
-
-# ── admin: hosts ──────────────────────────────────────────────────────────────
-
-
-@router.callback_query(F.data == "admin:hosts", IsAdmin())
-async def cb_admin_hosts(call: CallbackQuery, connection: Connection) -> None:
-    try:
-        hosts = await db.get_hosts(connection)
-    except Exception:
-        hosts = []
-    await call.message.edit_text(
-        "🖥 <b>Хосты</b>", reply_markup=admin_hosts_menu(hosts), parse_mode="HTML"
-    )
-
-
-@router.callback_query(F.data.startswith("admin:delhost:"), IsAdmin())
-async def cb_admin_delhost(call: CallbackQuery, connection: Connection) -> None:
-    host_name = call.data.split(":", 2)[2]
-    try:
-        await db.delete_host(host_name, connection)
-    except Exception:
-        await call.answer("Ошибка удаления", show_alert=True)
-        return
-    await call.answer(f"Хост {host_name} удалён")
-    try:
-        hosts = await db.get_hosts(connection)
-    except Exception:
-        hosts = []
-    await call.message.edit_text(
-        "🖥 <b>Хосты</b>", reply_markup=admin_hosts_menu(hosts), parse_mode="HTML"
-    )
-
-
-@router.callback_query(F.data == "admin:addhost", IsAdmin())
-async def cb_admin_addhost(call: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(AdminAddHost.host_name)
-    await call.message.edit_text(
-        "Введите <b>имя хоста</b> (уникальное):", parse_mode="HTML"
-    )
-
-
-@router.message(AdminAddHost.host_name, IsAdmin())
-async def fsm_host_name(message: Message, state: FSMContext) -> None:
-    await state.update_data(host_name=message.text.strip())
-    await state.set_state(AdminAddHost.host_url)
-    await message.answer(
-        "Введите <b>URL панели</b> (напр. https://1.2.3.4:2053):", parse_mode="HTML"
-    )
-
-
-@router.message(AdminAddHost.host_url, IsAdmin())
-async def fsm_host_url(message: Message, state: FSMContext) -> None:
-    await state.update_data(host_url=message.text.strip())
-    await state.set_state(AdminAddHost.api_token)
-    await message.answer(
-        "Введите <b>API токен</b> (Settings → Security → API Token):", parse_mode="HTML"
-    )
-
-
-@router.message(AdminAddHost.api_token, IsAdmin())
-async def fsm_host_api_token(message: Message, state: FSMContext) -> None:
-    await state.update_data(api_token=message.text.strip())
-    await state.set_state(AdminAddHost.inbound_id)
-    await message.answer("Введите <b>ID inbound</b> (число):", parse_mode="HTML")
-
-
-@router.message(AdminAddHost.inbound_id, IsAdmin())
-async def fsm_host_inbound(message: Message, state: FSMContext) -> None:
-    try:
-        inbound_id = int(message.text.strip())
-    except ValueError:
-        await message.answer("Введите число")
-        return
-    await state.update_data(inbound_id=inbound_id)
-    await state.set_state(AdminAddHost.public_hostname)
-    await message.answer(
-        "Введите <b>публичный hostname</b> (или '-' чтобы пропустить):",
-        parse_mode="HTML",
-    )
-
-
-@router.message(AdminAddHost.public_hostname, IsAdmin())
-async def fsm_host_pub_hostname(message: Message, state: FSMContext) -> None:
-    val = message.text.strip()
-    await state.update_data(public_hostname=None if val == "-" else val)
-    await state.set_state(AdminAddHost.public_url)
-    await message.answer(
-        "Введите <b>публичный URL подписки</b> (или '-'):", parse_mode="HTML"
-    )
-
-
-@router.message(AdminAddHost.public_url, IsAdmin())
-async def fsm_host_pub_url(message: Message, state: FSMContext) -> None:
-    val = message.text.strip()
-    await state.update_data(public_url=None if val == "-" else val)
-    await state.set_state(AdminAddHost.additional_inbound_ids)
-    await message.answer(
-        "Дополнительные inbound ID через запятую (или '-'):", parse_mode="HTML"
-    )
-
-
-@router.message(AdminAddHost.additional_inbound_ids, IsAdmin())
-async def fsm_host_extra_inbounds(
-    message: Message, state: FSMContext, connection: Connection
-) -> None:
-    val = message.text.strip()
-    extra: list[int] = []
-    if val != "-":
-        try:
-            extra = [int(x.strip()) for x in val.split(",") if x.strip()]
-        except ValueError:
-            await message.answer("Введите числа через запятую или '-'")
-            return
-
-    data = await state.get_data()
-    await state.clear()
-
-    host = Host(
-        host_name=data["host_name"],
-        host_url=data["host_url"],
-        api_token=data["api_token"],
-        inbound_id=data["inbound_id"],
-        public_hostname=data.get("public_hostname"),
-        public_url=data.get("public_url"),
-        additional_inbound_ids=extra,
-    )
-    try:
-        await db.add_host(host, connection)
-    except Exception:
-        await message.answer("Ошибка добавления хоста")
-        return
-    await message.answer(
-        f"✅ Хост <b>{host.host_name}</b> добавлен.",
-        reply_markup=admin_menu(),
-        parse_mode="HTML",
-    )
-
-
-# ── admin: plans ──────────────────────────────────────────────────────────────
-
-
-@router.callback_query(F.data == "admin:plans", IsAdmin())
-async def cb_admin_plans(call: CallbackQuery, connection: Connection) -> None:
-    try:
-        plans = await db.get_plans(connection)
-    except Exception:
-        plans = []
-    await call.message.edit_text(
-        "📦 <b>Тарифы</b>", reply_markup=admin_plans_menu(plans), parse_mode="HTML"
-    )
-
-
-@router.callback_query(F.data.startswith("admin:delplan:"), IsAdmin())
-async def cb_admin_delplan(call: CallbackQuery, connection: Connection) -> None:
-    plan_id = int(call.data.split(":")[2])
-    try:
-        await db.delete_plan(plan_id, connection)
-    except Exception:
-        await call.answer("Ошибка удаления", show_alert=True)
-        return
-    await call.answer("Тариф удалён")
-    try:
-        plans = await db.get_plans(connection)
-    except Exception:
-        plans = []
-    await call.message.edit_text(
-        "📦 <b>Тарифы</b>", reply_markup=admin_plans_menu(plans), parse_mode="HTML"
-    )
-
-
-@router.callback_query(F.data == "admin:addplan", IsAdmin())
-async def cb_admin_addplan(
-    call: CallbackQuery, state: FSMContext, connection: Connection
-) -> None:
-    try:
-        hosts = await db.get_hosts(connection)
-    except Exception:
-        await call.answer("Сначала добавьте хост", show_alert=True)
-        return
-    names = ", ".join(h.host_name for h in hosts)
-    await state.set_state(AdminAddPlan.host_name)
-    await call.message.edit_text(
-        f"Введите <b>имя хоста</b> из списка:\n{names}", parse_mode="HTML"
-    )
-
-
-@router.message(AdminAddPlan.host_name, IsAdmin())
-async def fsm_plan_host(
-    message: Message, state: FSMContext, connection: Connection
-) -> None:
-    try:
-        await db.get_host(message.text.strip(), connection)
-    except Exception:
-        await message.answer("Хост не найден. Введите точное имя.")
-        return
-    await state.update_data(host_name=message.text.strip())
-    await state.set_state(AdminAddPlan.plan_name)
-    await message.answer("Введите <b>название тарифа</b>:", parse_mode="HTML")
-
-
-@router.message(AdminAddPlan.plan_name, IsAdmin())
-async def fsm_plan_name(message: Message, state: FSMContext) -> None:
-    await state.update_data(plan_name=message.text.strip())
-    await state.set_state(AdminAddPlan.months)
-    await message.answer("Введите <b>количество месяцев</b>:", parse_mode="HTML")
-
-
-@router.message(AdminAddPlan.months, IsAdmin())
-async def fsm_plan_months(message: Message, state: FSMContext) -> None:
-    try:
-        months = int(message.text.strip())
-    except ValueError:
-        await message.answer("Введите число")
-        return
-    await state.update_data(months=months)
-    await state.set_state(AdminAddPlan.price)
-    await message.answer("Введите <b>цену</b> (₽):", parse_mode="HTML")
-
-
-@router.message(AdminAddPlan.price, IsAdmin())
-async def fsm_plan_price(
-    message: Message, state: FSMContext, connection: Connection
-) -> None:
-    try:
-        price = float(message.text.strip().replace(",", "."))
-    except ValueError:
-        await message.answer("Введите число")
-        return
-
-    data = await state.get_data()
-    await state.clear()
-
-    plan = Plan(
-        id=0,
-        host_name=data["host_name"],
-        plan_name=data["plan_name"],
-        months=data["months"],
-        price=price,
-    )
-    try:
-        await db.add_plan(plan, connection)
-    except Exception:
-        await message.answer("Ошибка добавления тарифа")
-        return
-    await message.answer(
-        f"✅ Тариф <b>{plan.plan_name}</b> добавлен.",
-        reply_markup=admin_menu(),
-        parse_mode="HTML",
-    )
-
-
-# ── admin: broadcast ──────────────────────────────────────────────────────────
-
-
-@router.callback_query(F.data == "admin:broadcast", IsAdmin())
-async def cb_admin_broadcast(call: CallbackQuery, state: FSMContext) -> None:
+@router.message(Command("broadcast"), IsAdmin())
+async def cmd_broadcast(message: Message, state: FSMContext) -> None:
     await state.set_state(AdminBroadcast.message)
-    await call.message.edit_text(
-        "Отправьте сообщение для рассылки.\n"
-        "Можно текст (HTML), фото, видео или документ с подписью."
-    )
+    await message.answer("Отправьте сообщение для рассылки...")
 
 
 @router.message(AdminBroadcast.message, IsAdmin())
 async def fsm_broadcast(
-    message: Message, state: FSMContext, bot: Bot, connection: Connection
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    session: ClientSession,
+    settings: Settings,
 ) -> None:
     await state.clear()
     try:
-        hosts = await db.get_hosts(connection)
+        maybe_clients = await xui.get_all_clients(
+            session=session, panel_url=settings.xui_url
+        )
     except Exception:
-        await message.answer("Нет хостов для рассылки")
+        logger.exception("broadcast could not list clients")
+        await message.answer("Не удалось получить список пользователей")
         return
-
-    tg_ids: set[int] = set()
-    for host in hosts:
-        try:
-            clients = await xui.get_all_clients(host)
-            for c in clients:
-                if c.tg_id:
-                    tg_ids.add(c.tg_id)
-        except Exception:
-            continue
+    match maybe_clients:
+        case Result(tag="ok", ok=clients):
+            tg_ids = {c.tg_id for c in clients if c.tg_id}
+        case Result(tag="error", error=error):
+            logger.error("broadcast could not list clients: %s", error)
+            await message.answer("Не удалось получить список пользователей")
+            return
 
     sent, failed = 0, 0
     for tg_id in tg_ids:
-        try:
-            await bot.copy_message(tg_id, message.chat.id, message.message_id)
-            sent += 1
-        except Exception as e:
-            logger.warning("broadcast to %d failed: %s", tg_id, e)
-            failed += 1
+        while True:
+            try:
+                await bot.copy_message(tg_id, message.chat.id, message.message_id)
+            except TelegramRetryAfter as e:
+                logger.warning("broadcast rate limited: wait %d seconds", e.retry_after)
+                await asyncio.sleep(e.retry_after)
+            except Exception as e:
+                logger.warning("broadcast to %d failed: %s", tg_id, e)
+                failed += 1
+                break
+            else:
+                sent += 1
+                break
+        await asyncio.sleep(0.05)
     await message.answer(
         f"📢 Рассылка завершена\n✅ Отправлено: {sent}\n❌ Ошибок: {failed}",
-        reply_markup=admin_menu(),
     )

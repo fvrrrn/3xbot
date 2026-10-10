@@ -1,6 +1,7 @@
 from typing import Annotated
 
-from pydantic import AfterValidator, HttpUrl
+import yarl
+from pydantic import AfterValidator, HttpUrl, RootModel, ValidateAs
 from pydantic_settings import BaseSettings
 
 
@@ -30,10 +31,13 @@ def _with_telegram_port(url: NonEmptyUrl) -> NonEmptyUrl:
 
 class Settings(BaseSettings):
     telegram_bot_token: str
-    telegram_admin_ids: list[int]
+    telegram_admin_id: int
     support_group_id: int
     payment_details: str
-    xui_url: HttpUrl
+    xui_url: Annotated[
+        yarl.URL,
+        ValidateAs(RootModel[HttpUrl], lambda url: yarl.URL(str(url.root))),
+    ]
     xui_token: str
     trial_days: int
     plan_months: int
@@ -46,6 +50,3 @@ class Settings(BaseSettings):
     ]
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
-
-
-settings = Settings()
